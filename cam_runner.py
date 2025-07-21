@@ -1,26 +1,35 @@
 from __future__ import annotations
-
-from typing import Iterable, Optional, List
+from typing import List, Optional
 
 import cv2
 import numpy as np
 import torch
 from torch import nn
 from pytorch_grad_cam import GradCAM
-from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
+from pytorch_grad_cam.utils.model_targets import BaseCAMTarget
 
 
+# ------------------------------------------------------------------
+# Scalar target: average logit of class_idx over time (if any)
+# ------------------------------------------------------------------
+class SeqClassifierTarget(BaseCAMTarget):
+    def __init__(self, class_idx: int):
+        self.class_idx = class_idx
+
+    def __call__(self, model_out: torch.Tensor) -> torch.Tensor:
+        # (B,C) or (B,T,C)  ➜  scalar
+        if model_out.ndim == 2:               # (B, C)
+            return model_out[:, self.class_idx].mean()
+        elif model_out.ndim == 3:             # (B, T, C)
+            return model_out[:, :, self.class_idx].mean()
+        else:
+            raise ValueError(f"Unexpected output shape {tuple(model_out.shape)}")
+
+
+# ------------------------------------------------------------------
+# Grad-CAM runner
+# ------------------------------------------------------------------
 class CAMRunner:
-    """Run Grad-CAM on 3-D video models with minimal VRAM."""
-
-    class TemporalTarget:           # <-- new helper
-        def __init__(self, time_idx: int, class_id: int):
-            self.t = time_idx
-            self.c = class_id
-        def __call__(self, model_out):
-            # model_out shape (B, T, C) → scalar
-            return model_out[:, self.t, self.c]
-
     def __init__(self, model: nn.Module, target_layers: List[nn.Module]):
         self.model = model
         self.layers = target_layers
@@ -31,53 +40,42 @@ class CAMRunner:
         device: torch.device,
         class_id: Optional[int] = None,
     ) -> List[np.ndarray]:
-
+        """Return list of CAMs, one per target layer."""
         if isinstance(inputs, (list, tuple)):
             inputs = [x.to(device) for x in inputs]
-            input_tensor = inputs[0]          # Grad-CAM only needs one
+            input_tensor = inputs[0]          # Grad-CAM needs a representative tensor
         else:
             inputs = inputs.to(device)
             input_tensor = inputs
 
-        # forward once per layer (saves RAM)
-        with torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
-            outputs = (
-                self.model(*inputs) if isinstance(inputs, list) else self.model(inputs)
-            )  # (1, T, C)
-
-        # choose default class_id if not provided
-        if class_id is None:
-            mid = outputs.shape[1] // 2
-            class_id = int(outputs[0, mid].argmax())
-
-        time_idx = outputs.shape[1] // 2  # middle frame
-        target = [self.TemporalTarget(time_idx, class_id)]
-
-        results: List[np.ndarray] = []
+        cams: List[np.ndarray] = []
         for layer in self.layers:
             cam = GradCAM(model=self.model, target_layers=[layer])
-            grayscale_cam = cam(input_tensor=input_tensor, targets=target)
+
+            with torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
+                output = (
+                    self.model(*inputs) if isinstance(inputs, list)
+                    else self.model(inputs)
+                )                            # (B,C) or (B,T,C)
+
+            if class_id is None:
+                argmax_c = (
+                    output[:, :, :].mean(1).argmax() if output.ndim == 3
+                    else output.argmax()
+                )
+                class_id = int(argmax_c)
+
+            targets = [SeqClassifierTarget(class_id)]
+            grayscale_cam = cam(input_tensor=input_tensor, targets=targets)
+            cams.append(grayscale_cam[0])    # batch idx 0
             cam.clear_hooks()
-            results.append(grayscale_cam[0])        # (T,H,W) or (H,W)
-        return results
 
-    
+        return cams
 
-def overlay_heatmap(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    """
-    Overlay a heatmap on an image.
-    
-    Args:
-        image (np.ndarray): The original image.
-        mask (np.ndarray): The heatmap to overlay, should be the same size as the image.
-    
-    Returns:
-        np.ndarray: The image with the heatmap overlayed.
-    """
-    heatmap = cv2.applyColorMap(np.uint8(255*mask), cv2.COLORMAP_JET)
-    heatmap = np.float32(heatmap) / 255
-    if image.max() > 1:
-        image = image / 255.0
-    overlay = heatmap * 0.5 + image * 0.5 # Control the intensity of the overlay (OPACITY)
-    overlay = np.clip(overlay, 0, 1)
-    return np.uint8(overlay * 255)
+
+# ------------------------------------------------------------------
+def overlay_heatmap(img: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Overlay CAM on RGB image (uint8)."""
+    heat = cv2.applyColorMap((mask * 255).astype(np.uint8), cv2.COLORMAP_JET)
+    blended = np.clip(0.5 * heat.astype(float) + 0.5 * img.astype(float), 0, 255)
+    return blended.astype(np.uint8)
