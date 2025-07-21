@@ -51,6 +51,8 @@ class CAMRunner:
 
         cams: List[np.ndarray] = []
         saved_mode = self.model.training      # cuDNN RNN backward guard
+        saved_cudnn = torch.backends.cudnn.enabled
+        torch.backends.cudnn.enabled = False
         self.model.train()
         try:
             for layer in self.layers:
@@ -76,6 +78,7 @@ class CAMRunner:
         finally:
             if not saved_mode:
                 self.model.eval()
+            torch.backends.cudnn.enabled = saved_cudnn
 
         return cams
 
