@@ -1,8 +1,9 @@
-torch==2.3.1+cpu
-torchvision==0.18.1+cpu
+torch==1.13.0+cu117
+torchvision==0.14.0+cu117
 pytorchvideo==0.1.5
 opencv-python==4.10.0.82
-av==14.3.0
+av==10.0.0
 pyyaml
 tqdm
-grad-cam
+pytorch-grad-cam==1.5.2
+numpy==1.24.4
