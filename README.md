@@ -36,15 +36,17 @@ No additional system packages are required; all image I/O is done via **PyAV** &
 
 ---
 
-## 2  Directory Layout (fixed)
+## 2  Directory Layout (fixed and Git setup)
 
-```
+```text
 ~/nirmal/gradcam/
 ├── checkpoints/
 │   ├── slowfast_phoenix2014_dev_18.01_test_18.28.pt
 │   └── twostreamslr.ckpt
-├── code/                # ← all Python modules created by Codex
-├── data/
+├── code/                # ← **Git repository root** (already `git init`‑ed)
+│   ├── datasets/ …      # Codex: place *all* .py files **directly here**
+│   └── (no extra nesting)
+├── data/                # ← **outside the repo, never pushed**
 │   └── phoenix-2014-multisigner/
 │       ├── annotations/manual/{train,dev,test}.corpus.csv
 │       ├── annotations/manual/gloss2ids.pkl
@@ -52,16 +54,20 @@ No additional system packages are required; all image I/O is done via **PyAV** &
 │       │   ├── fullFrame-256x256px/{train,dev,test}/<seq>/1/*.png   # RGB
 │       │   └── fullFrame-210x260px/{train,dev,test}/<seq>/1/*.png   # low‑res RGB for key‑points
 │       └── keypoints/
-│           ├── keypoints.pkl                     # [T,133,3] COCO WholeBody coords
-│           └── heatmaps/                         # auto‑cached [T,2,112,112] tensors
+│           ├── keypoints.pkl                     # [T,133,3] coords
+│           └── heatmaps/                         # auto‑cached tensors
 └── outputs/   # auto‑generated at runtime
 ```
 
-Codex **must not** change these paths.
+**Important for Codex**
+
+* Treat `~/nirmal/gradcam/code` as the **project root** – all modules, entry‑points, and package imports live here.
+* **Do not create another `code/` folder** inside the repo; the existing directory is already version‑controlled.
+* Paths to checkpoints/data remain **relative to this layout** (e.g. `../data/phoenix-2014-multisigner/...`).
 
 ---
 
-## 3  Model Wrappers
+## 3  Model Wrappers  Model Wrappers
 
 ### 3.1  SlowFast‑Sign
 
