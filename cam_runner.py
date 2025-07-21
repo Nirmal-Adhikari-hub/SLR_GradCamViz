@@ -50,26 +50,32 @@ class CAMRunner:
             input_tensor = inputs
 
         cams: List[np.ndarray] = []
-        for layer in self.layers:
-            cam = GradCAM(model=self.model, target_layers=[layer])
+        saved_mode = self.model.training      # cuDNN RNN backward guard
+        self.model.train()
+        try:
+            for layer in self.layers:
+                cam = GradCAM(model=self.model, target_layers=[layer])
 
-            with torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
-                output = (
-                    self.model(*inputs) if isinstance(inputs, list)
-                    else self.model(inputs)
-                )                            # (B,C) or (B,T,C)
+                with torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
+                    output = (
+                        self.model(*inputs) if isinstance(inputs, list)
+                        else self.model(inputs)
+                    )                            # (B,C) or (B,T,C)
 
-            if class_id is None:
-                argmax_c = (
-                    output[:, :, :].mean(1).argmax() if output.ndim == 3
-                    else output.argmax()
-                )
-                class_id = int(argmax_c)
+                if class_id is None:
+                    argmax_c = (
+                        output[:, :, :].mean(1).argmax() if output.ndim == 3
+                        else output.argmax()
+                    )
+                    class_id = int(argmax_c)
 
-            targets = [SeqClassifierTarget(class_id)]
-            grayscale_cam = cam(input_tensor=input_tensor, targets=targets)
-            cams.append(grayscale_cam[0])    # batch idx 0
-            cam.clear_hooks()
+                targets = [SeqClassifierTarget(class_id)]
+                grayscale_cam = cam(input_tensor=input_tensor, targets=targets)
+                cams.append(grayscale_cam[0])    # batch idx 0
+                cam.clear_hooks()
+        finally:
+            if not saved_mode:
+                self.model.eval()
 
         return cams
 
