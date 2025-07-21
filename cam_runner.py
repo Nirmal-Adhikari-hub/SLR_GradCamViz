@@ -48,7 +48,7 @@ class CAMRunner:
 
         results: List[np.ndarray] = []
         for layer in self.layers:
-            cam = GradCAM(model=self.model, target_layers=[layer], use_cuda=device.type == 'cuda')
+            cam = GradCAM(model=self.model, target_layers=[layer], device=device)
             with torch.cuda.amp.autocast(enabled=device.type == 'cuda'):
                 outputs = self.model(*inputs) if isinstance(inputs, list) else self.model(inputs)
             if class_id is None:
