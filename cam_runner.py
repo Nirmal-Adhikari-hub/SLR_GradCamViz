@@ -6,13 +6,14 @@ import numpy as np
 import torch
 from torch import nn
 from pytorch_grad_cam import GradCAM
-from pytorch_grad_cam.utils.model_targets import BaseCAMTarget
+# from pytorch_grad_cam.utils.model_targets import BaseCAMTarget
+
 
 
 # ------------------------------------------------------------------
 # Scalar target: average logit of class_idx over time (if any)
 # ------------------------------------------------------------------
-class SeqClassifierTarget(BaseCAMTarget):
+class SeqClassifierTarget:
     def __init__(self, class_idx: int):
         self.class_idx = class_idx
 
