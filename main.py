@@ -63,7 +63,7 @@ def main():
 
     # set up paths relative to this script
     repo = Path(__file__).resolve().parent
-    root = repo.parent / "data" / "phonix-2014-multisigner"
+    root = repo.parent / "data" / "phoenix-2014-multisigner"
     out_root = repo.parent / "outputs"
 
     # build sequence list if provided
