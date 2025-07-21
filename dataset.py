@@ -165,63 +165,92 @@ class PhoenixVideoTextDataset(Dataset):
         return 0
 
 
+    # ------------------------------------------------------------------
+    #  Pose helper: works with both dict-style and list-style pickles
+    # ------------------------------------------------------------------
     def _load_pose(self, seq: str, num_frames: int) -> Optional[torch.Tensor]:
         """
-        Resolve key-point heat-maps for one sequence.
+        Build / load 2-channel pose heat-maps for one sequence.
 
-        1.  Load and memo-ise keypoints.pkl (supports dict or list style).
-        2.  Map fullFrame-256×256 path → fullFrame-210×260 path.
-        3.  If found, render / cache Gaussian heat-maps.
-        4.  If missing, raise a RuntimeError so the caller notices.
+        Supports two pickle formats:
+
+        1. dict  {long_path: {'keypoints': ndarray(T,K,3)}}
+        2. list  [{'file_path': str, 'predictions': {'keypoints': ndarray(K,2),
+                                                    'keypoint_scores': ndarray(K)}}]
+                 – one element PER FRAME (common COCO-WholeBody export)
+
+        The code converts (2) ➜ (1) the first time it sees the file and
+        memo-ises the result in self._kp_cache (shared across calls).
         """
 
         keypkl = self.root / "keypoints" / "keypoints.pkl"
         if not keypkl.exists():
             raise RuntimeError(f"[Pose] keypoints file missing: {keypkl}")
 
-        # ---------- 1) load & normalise pickle once ----------
+        # ------------------------------------------------------------------
+        # 1) Build _kp_cache once per Dataset
+        # ------------------------------------------------------------------
         if not hasattr(self, "_kp_cache"):
             raw = _load_pickle(keypkl)
 
-            if isinstance(raw, dict):
-                kp_dict = {k: v["keypoints"] if isinstance(v, dict) else v
-                           for k, v in raw.items()}
-            elif isinstance(raw, list):
+            if isinstance(raw, dict):                         # ----- dict style
                 kp_dict = {
-                    str(item.get("file_path") or item.get("path")): (
-                        item.get("predictions") or item.get("keypoints")
-                    )
-                    for item in raw if "file_path" in item or "path" in item
+                    k: (v["keypoints"] if isinstance(v, dict) else v)
+                    for k, v in raw.items()
                 }
+
+            elif isinstance(raw, list):                       # ----- list style
+                # Group list entries by sequence folder (before first '/')
+                seq_to_frames: dict[str, list] = {}
+                for item in raw:
+                    fpath = str(item.get("file_path") or item.get("path"))
+                    seq_name = fpath.split("/")[0]            # e.g. 01April_…
+                    seq_to_frames.setdefault(seq_name, []).append(item)
+
+                # Sort frames, stack into (T,133,3)
+                kp_dict = {}
+                for seq_name, frames in seq_to_frames.items():
+                    frames.sort(key=lambda x: x["file_path"])
+                    stacked = []
+                    for fr in frames:
+                        xy = fr["predictions"]["keypoints"]           # (133,2)
+                        sc = fr["predictions"]["keypoint_scores"]     # (133,)
+                        stacked.append(np.concatenate([xy, sc[:, None]], axis=1))
+                    kp_dict[f"{seq_name}"] = np.stack(stacked)        # (T,133,3)
             else:
-                raise TypeError(
-                    f"[Pose] Unsupported pickle top-level type: {type(raw)}"
-                )
-            self._kp_cache = kp_dict
+                raise TypeError(f"[Pose] unsupported pickle type {type(raw)}")
 
-        kp_dict: dict[str, np.ndarray] = self._kp_cache  # alias
+            self._kp_cache = kp_dict  # memoise
 
-        # ---------- 2) make the 210×260 lookup key ----------
-        #   seq  = "fullFrame-256x256px/train/…"
-        seq210 = seq.replace("fullFrame-256x256px", "fullFrame-210x260px")
+        kp_dict: dict[str, np.ndarray] = self._kp_cache
 
-        if seq210 not in kp_dict:
-            raise RuntimeError(
-                f"[Pose] sequence not found in keypoints.pkl: {seq210}"
-            )
+        # ------------------------------------------------------------------
+        # 2) Find the right entry by substring match  (train/dev/test already
+        #    encoded via self.split, seq is like 01April_…)
+        # ------------------------------------------------------------------
+        needle = f"{seq}"
+        matches = [k for k in kp_dict.keys() if needle in k]
 
-        # ---------- 3) load or build heat-map cache ----------
+        if not matches:
+            raise RuntimeError(f"[Pose] keypoints not found for '{seq}'")
+        if len(matches) > 1:
+            print(f"[Pose] Warning: {len(matches)} matches for {seq}; using first.")
+
+        kp_arr = kp_dict[matches[0]][:: self.frame_skip]   # (T,K,3)
+
+        # ------------------------------------------------------------------
+        # 3) Cache / load rendered heat-maps (T,2,H,W)
+        # ------------------------------------------------------------------
         cache = self.pose_cache_dir / f"{seq}.npy"
         if cache.exists():
             data = np.load(cache)
         else:
-            kp = kp_dict[seq210][:: self.frame_skip]  # (T, 133, 3)
-            data = self._render_heatmaps(np.asarray(kp, dtype=np.float32))
+            data = self._render_heatmaps(kp_arr.astype(np.float32))
             cache.parent.mkdir(parents=True, exist_ok=True)
             np.save(cache, data)
 
-        # ---------- 4) return tensor  ----------
         return torch.from_numpy(data[:num_frames]).float()
+
     
 
 
