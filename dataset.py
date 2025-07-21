@@ -166,33 +166,63 @@ class PhoenixVideoTextDataset(Dataset):
 
 
     def _load_pose(self, seq: str, num_frames: int) -> Optional[torch.Tensor]:
-        '''
-        Args:
-        seq: sequence ID string
-        num_frames: number of frames expected after skipping
-        Operation:
-        Attempts to load pose heatmaps from cache; if missing, loads raw keypoints,
-        renders them into heatmaps, caches the result.
-        Returns:
-        Optional[Tensor]: FloatTensor of shape (num_frames, 2, H, W) or None if no keypoints file.
-        '''
+        """
+        Resolve key-point heat-maps for one sequence.
+
+        1.  Load and memo-ise keypoints.pkl (supports dict or list style).
+        2.  Map fullFrame-256×256 path → fullFrame-210×260 path.
+        3.  If found, render / cache Gaussian heat-maps.
+        4.  If missing, raise a RuntimeError so the caller notices.
+        """
 
         keypkl = self.root / "keypoints" / "keypoints.pkl"
         if not keypkl.exists():
-            return None
+            raise RuntimeError(f"[Pose] keypoints file missing: {keypkl}")
+
+        # ---------- 1) load & normalise pickle once ----------
+        if not hasattr(self, "_kp_cache"):
+            raw = _load_pickle(keypkl)
+
+            if isinstance(raw, dict):
+                kp_dict = {k: v["keypoints"] if isinstance(v, dict) else v
+                           for k, v in raw.items()}
+            elif isinstance(raw, list):
+                kp_dict = {
+                    str(item.get("file_path") or item.get("path")): (
+                        item.get("predictions") or item.get("keypoints")
+                    )
+                    for item in raw if "file_path" in item or "path" in item
+                }
+            else:
+                raise TypeError(
+                    f"[Pose] Unsupported pickle top-level type: {type(raw)}"
+                )
+            self._kp_cache = kp_dict
+
+        kp_dict: dict[str, np.ndarray] = self._kp_cache  # alias
+
+        # ---------- 2) make the 210×260 lookup key ----------
+        #   seq  = "fullFrame-256x256px/train/…"
+        seq210 = seq.replace("fullFrame-256x256px", "fullFrame-210x260px")
+
+        if seq210 not in kp_dict:
+            raise RuntimeError(
+                f"[Pose] sequence not found in keypoints.pkl: {seq210}"
+            )
+
+        # ---------- 3) load or build heat-map cache ----------
         cache = self.pose_cache_dir / f"{seq}.npy"
         if cache.exists():
             data = np.load(cache)
         else:
-            # kp = _load_pickle(keypkl)[seq][::self.frame_skip]
-
-            # key inside .pkl uses the 210×260 path
-            seq210 = seq.replace("fullFrame-256x256px", "fullFrame-210x260px")
-            kp = _load_pickle(keypkl)[seq210]["keypoints"][::self.frame_skip]
+            kp = kp_dict[seq210][:: self.frame_skip]  # (T, 133, 3)
             data = self._render_heatmaps(np.asarray(kp, dtype=np.float32))
             cache.parent.mkdir(parents=True, exist_ok=True)
             np.save(cache, data)
+
+        # ---------- 4) return tensor  ----------
         return torch.from_numpy(data[:num_frames]).float()
+    
 
 
     def _render_heatmaps(self, keypoints: np.ndarray) -> np.ndarray:
