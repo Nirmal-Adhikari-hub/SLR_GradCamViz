@@ -48,5 +48,5 @@ class TwoStreamSLR(nn.Module):
             self.pose_stream[0],
             self.fusion_module[0],
             self.rgb_stream[-1],
-            self.visual_head,
+            # self.visual_head,
         ]

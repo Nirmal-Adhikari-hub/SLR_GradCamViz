@@ -57,5 +57,5 @@ class SlowFastSign(nn.Module):
             self.conv2d.fast_path,
             self.conv2d.fast_path[-1],
             self.conv1d.fused_features,
-            self.temporal_model[1]
+            # self.temporal_model[1]
         ]
