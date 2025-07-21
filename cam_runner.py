@@ -57,7 +57,10 @@ class CAMRunner:
                 else:
                     class_id = int(outputs[0].argmax())
             targets = [ClassifierOutputTarget(class_id)]
-            grayscale_cam = cam(input_tensor=inputs, targets=targets)
+
+            # grayscale_cam = cam(input_tensor=inputs, targets=targets)
+            input_tensor = inputs[0] if isinstance(inputs, list) else inputs
+            grayscale_cam = cam(input_tensor=input_tensor, targets=targets)
             cam.clear_hooks()
             results.append(grayscale_cam[0])
         return results

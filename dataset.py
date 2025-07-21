@@ -184,7 +184,11 @@ class PhoenixVideoTextDataset(Dataset):
         if cache.exists():
             data = np.load(cache)
         else:
-            kp = _load_pickle(keypkl)[seq][::self.frame_skip]
+            # kp = _load_pickle(keypkl)[seq][::self.frame_skip]
+
+            # key inside .pkl uses the 210×260 path
+            seq210 = seq.replace("fullFrame-256x256px", "fullFrame-210x260px")
+            kp = _load_pickle(keypkl)[seq210]["keypoints"][::self.frame_skip]
             data = self._render_heatmaps(np.asarray(kp, dtype=np.float32))
             cache.parent.mkdir(parents=True, exist_ok=True)
             np.save(cache, data)
