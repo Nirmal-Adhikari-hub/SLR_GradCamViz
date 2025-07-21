@@ -89,10 +89,22 @@ def main():
             model = load_model(name, ckpt).to(device)
 
             # prepare input tensor(s)
+            # if name == "slowfast":
+            #     inp = batch["rgb"]
+            # else:
+            #     inp = [batch["rgb"], batch["pose"]]
+
             if name == "slowfast":
-                inp = batch["rgb"]
+                # (T,C,H,W) ➜ (1,C,T,H,W)
+                rgb5d = batch["rgb"].permute(1, 0, 2, 3).unsqueeze(0).to(device)
+                inp = rgb5d
             else:
-                inp = [batch["rgb"], batch["pose"]]
+                rgb5d  = batch["rgb"].permute(1, 0, 2, 3).unsqueeze(0).to(device)
+                pose5d = (
+                    batch["pose"].permute(1, 0, 2, 3).unsqueeze(0).to(device)
+                    if batch["pose"] is not None else None
+                )
+                inp = [rgb5d, pose5d]
 
             # compute Grad-CAMs for specified target layer(s)
             runner = CAMRunner(model, model.target_layers)
