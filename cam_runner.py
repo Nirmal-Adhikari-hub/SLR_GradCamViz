@@ -106,8 +106,11 @@ class CAMRunner:
                         print(f"[CAM] Skipped {layer} – unsupported shape {tuple(output.shape)}")
                         continue
 
+                    # loss = output[:, :, class_id].mean()
+                    # self.model.zero_grad()
                     loss = output[:, :, class_id].mean()
                     self.model.zero_grad()
+                    output.retain_grad()          # ← NEW (capture grads on non-leaf)
                     loss.backward(retain_graph=True)
                     cam_1d = time_gradcam(output.detach(), output.grad)
                     cams.append(cam_1d)                  # (T,) curve
