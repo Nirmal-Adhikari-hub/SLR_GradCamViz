@@ -115,13 +115,30 @@ def main():
             cams = runner.run(inp, device, target)
 
             # save heatmap overlays per frame and per layer
+            # for idx, cam in enumerate(cams):
+            #     layer_dir = outputs_dir / name / f"layer{idx + 1}"
+            #     layer_dir.mkdir(parents=True, exist_ok=True)
+            #     for t in range(cam.shape[0]):
+            #         frame = batch["rgb"][t].permute(1, 2, 0).cpu().numpy()
+            #         overlay = overlay_heatmap(frame, cam[t])
+            #         cv2.imwrite(str(layer_dir / f"frame_{t:03d}.png"), overlay)
+
             for idx, cam in enumerate(cams):
                 layer_dir = outputs_dir / name / f"layer{idx + 1}"
                 layer_dir.mkdir(parents=True, exist_ok=True)
-                for t in range(cam.shape[0]):
-                    frame = batch["rgb"][t].permute(1, 2, 0).cpu().numpy()
-                    overlay = overlay_heatmap(frame, cam[t])
-                    cv2.imwrite(str(layer_dir / f"frame_{t:03d}.png"), overlay)
+
+                # 2-D CAM → overlay per frame
+                if cam.ndim == 3:                     # (T,H,W)
+                    for t in range(cam.shape[0]):
+                        frame = batch["rgb"][t].permute(1, 2, 0).cpu().numpy()
+                        overlay = overlay_heatmap(frame, cam[t])
+                        cv2.imwrite(str(layer_dir / f"frame_{t:03d}.png"), overlay)
+
+                # 1-D CAM → save curve for later plotting
+                elif cam.ndim == 1:                   # (T,)
+                    np.save(layer_dir / "temporal_cam.npy", cam)
+                else:
+                    print(f"[WARN] Unknown CAM shape {cam.shape} – skipped save")
 
             # also compute model predictions
             with torch.no_grad(), torch.cuda.amp.autocast(enabled=(device.type == "cuda")):

@@ -114,6 +114,10 @@ class CAMRunner:
                     loss.backward(retain_graph=True)
                     cam_1d = time_gradcam(output.detach(), output.grad)
                     cams.append(cam_1d)                  # (T,) curve
+                    # cams list now holds either:
+                    #   * 3-D array (T,H,W)  – spatial map
+                    #   * 1-D array (T,)     – temporal curve
+
 
         finally:
             if not saved_mode:
@@ -124,8 +128,26 @@ class CAMRunner:
 
 
 # ────────────────────────────────────────────────────────────
-def overlay_heatmap(img: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    """Blend heatmap on RGB, return uint8."""
+def overlay_heatmap(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """
+    Blend CAM mask onto RGB image.
+
+    • If mask is 2-D or 3-D  → classic heat-map overlay.
+    • If mask is 1-D        → draw a coloured bar at the bottom of the frame.
+    """
+    if mask.ndim == 1:                                   # 1-D temporal curve
+        # normalise & convert to RGB bar (width = image width, height = 8 px)
+        bar_h = 8
+        curve = (mask / (mask.max() + 1e-8) * 255).astype(np.uint8)
+        bar   = cv2.applyColorMap(curve, cv2.COLORMAP_JET)      # (T,3)
+        bar   = cv2.resize(bar, (image.shape[1], bar_h), interpolation=cv2.INTER_NEAREST)
+        # stack bar under the frame
+        combined = np.vstack([image, bar])
+        return combined
+
+    # -------- spatial mask --------
     heat = cv2.applyColorMap((mask * 255).astype(np.uint8), cv2.COLORMAP_JET)
-    out  = np.clip(0.5 * heat.astype(float) + 0.5 * img.astype(float), 0, 255)
-    return out.astype(np.uint8)
+    if image.max() > 1:
+        image = image.astype(np.float32) / 255.0
+    blended = np.clip(0.5 * heat.astype(float) + 0.5 * image.astype(float), 0, 255)
+    return blended.astype(np.uint8)
