@@ -109,6 +109,11 @@ def main():
                 layer_dir = seq_out / name / f"layer{idx + 1}"
                 layer_dir.mkdir(parents=True, exist_ok=True)
 
+                # ---- temporal curve: save once, skip overlay ----
+                if cam.ndim == 1:                       # (T,)
+                    np.save(layer_dir / "temporal_cam.npy", cam)
+                    continue
+
                 if cam.ndim == 2:
                     cam = cam[None, ...]
 
