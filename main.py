@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import List
 
 import cv2
+import numpy as np
 import torch
 
 from dataset import PhoenixVideoTextDataset
