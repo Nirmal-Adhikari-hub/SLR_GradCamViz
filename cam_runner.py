@@ -54,6 +54,7 @@ class CAMRunner:
     def __init__(self, model: nn.Module, target_layers: List[nn.Module]):
         self.model = model
         self.layers = target_layers
+        
 
     def run(
         self,
@@ -71,60 +72,49 @@ class CAMRunner:
 
         cams: List[np.ndarray] = []
 
-        # ---- cuDNN LSTM backward guard ----------------------
-        saved_mode  = self.model.training
-        saved_cudnn = torch.backends.cudnn.enabled
-        torch.backends.cudnn.enabled = False
-        self.model.train()
+        saved_mode = self.model.training          # keep original mode
+        self.model.train()                        # RNNs need train mode
 
         try:
             for layer in self.layers:
-                # context-manager handles hook cleanup
+                layer_saved_cudnn = torch.backends.cudnn.enabled  # conv3d flag
+
                 with GradCAM(model=self.model, target_layers=[layer]) as cam:
-                    with torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
+                    with torch.cuda.amp.autocast(enabled=device.type == "cuda"):
                         output = (
                             self.model(*inputs) if isinstance(inputs, list)
                             else self.model(inputs)
-                        )                             # (B,C) or (B,T,C)
+                        )  # (B,C) or (B,T,C)
 
-                    # choose default class if none provided
                     if class_id is None:
                         class_id = int(
                             output.mean(1).argmax() if output.ndim == 3 else output.argmax()
                         )
 
-                    # ------------- spatial CAM ----------------
+                    # ---------- spatial CAM (H,W or T,H,W) ----------
                     try:
                         targets = [SeqClassifierTarget(class_id)]
                         gcam = cam(input_tensor=input_tensor, targets=targets)
-                        cams.append(gcam[0])              # 2-D / 3-D map
-                        continue                          # success ⇒ next layer
+                        cams.append(gcam[0])
                     except ValueError:
-                        pass                              # fall through to 1-D
+                        # ---------- temporal CAM (T,) ----------
+                        if output.ndim != 3:
+                            print(f"[CAM] Skipped {layer} – shape {tuple(output.shape)}")
+                        else:
+                            torch.backends.cudnn.enabled = False  # disable for LSTM backward
+                            loss = output[:, :, class_id].mean()
+                            self.model.zero_grad()
+                            output.retain_grad()
+                            loss.backward(retain_graph=True)
+                            cam_1d = time_gradcam(output.detach(), output.grad)
+                            cams.append(cam_1d)
 
-                    # ------------- temporal CAM --------------
-                    # run backward manually for 1-D tensors
-                    if output.ndim != 3:
-                        print(f"[CAM] Skipped {layer} – unsupported shape {tuple(output.shape)}")
-                        continue
-
-                    # loss = output[:, :, class_id].mean()
-                    # self.model.zero_grad()
-                    loss = output[:, :, class_id].mean()
-                    self.model.zero_grad()
-                    output.retain_grad()          # ← NEW (capture grads on non-leaf)
-                    loss.backward(retain_graph=True)
-                    cam_1d = time_gradcam(output.detach(), output.grad)
-                    cams.append(cam_1d)                  # (T,) curve
-                    # cams list now holds either:
-                    #   * 3-D array (T,H,W)  – spatial map
-                    #   * 1-D array (T,)     – temporal curve
-
+                # restore cuDNN flag before next layer
+                torch.backends.cudnn.enabled = layer_saved_cudnn
 
         finally:
             if not saved_mode:
                 self.model.eval()
-            torch.backends.cudnn.enabled = saved_cudnn
 
         return cams
 
