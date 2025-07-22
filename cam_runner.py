@@ -137,6 +137,12 @@ def overlay_heatmap(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
     • mask 2-D : classic heat-map overlay.
     • mask 1-D : draw a coloured bar under the frame.
     """
+    # esnure both inputs are numpy arrays
+    if torch.is_tensor(mask):
+        mask = mask.detach().cpu().numpy()
+    if torch.is_tensor(image):
+        image = image.detach().cpu().numpy()
+        
     if mask.ndim == 1:                                   # temporal curve
         bar_h  = 8
         curve  = (mask / (mask.max() + 1e-8) * 255).astype(np.uint8)  # (T,)
