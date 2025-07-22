@@ -8,6 +8,8 @@ import torch
 from torch import nn
 from pytorch_grad_cam import GradCAM
 
+from pathlib import Path
+
 
 # ────────────────────────────────────────────────────────────
 # 1-D Grad-CAM helper for (B, T, C) tensors
@@ -132,22 +134,40 @@ def overlay_heatmap(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
     """
     Blend CAM mask onto RGB image.
 
-    • If mask is 2-D or 3-D  → classic heat-map overlay.
-    • If mask is 1-D        → draw a coloured bar at the bottom of the frame.
+    • mask 2-D : classic heat-map overlay.
+    • mask 1-D : draw a coloured bar under the frame.
     """
-    if mask.ndim == 1:                                   # 1-D temporal curve
-        # normalise & convert to RGB bar (width = image width, height = 8 px)
-        bar_h = 8
-        curve = (mask / (mask.max() + 1e-8) * 255).astype(np.uint8)
-        bar   = cv2.applyColorMap(curve, cv2.COLORMAP_JET)      # (T,3)
-        bar   = cv2.resize(bar, (image.shape[1], bar_h), interpolation=cv2.INTER_NEAREST)
-        # stack bar under the frame
-        combined = np.vstack([image, bar])
-        return combined
+    if mask.ndim == 1:                                   # temporal curve
+        bar_h  = 8
+        curve  = (mask / (mask.max() + 1e-8) * 255).astype(np.uint8)  # (T,)
+        bar    = cv2.applyColorMap(curve, cv2.COLORMAP_JET)           # (T,3)
+        bar    = cv2.resize(bar, (image.shape[1], bar_h),
+                            interpolation=cv2.INTER_NEAREST)
+        return np.vstack([image, bar])                   # stack under frame
 
-    # -------- spatial mask --------
-    heat = cv2.applyColorMap((mask * 255).astype(np.uint8), cv2.COLORMAP_JET)
-    if image.max() > 1:
-        image = image.astype(np.float32) / 255.0
-    blended = np.clip(0.5 * heat.astype(float) + 0.5 * image.astype(float), 0, 255)
+    # ─ spatial mask ─
+    heat = cv2.applyColorMap((mask * 255).astype(np.uint8),
+                             cv2.COLORMAP_JET)
+    blended = np.clip(0.5 * heat.astype(float) +
+                      0.5 * image.astype(float), 0, 255)
     return blended.astype(np.uint8)
+
+
+# ------------------------------------------------------------------
+def save_or_overlay(
+    frame: np.ndarray,
+    cam:   np.ndarray,          # single 2-D slice  OR  1-D curve
+    layer_dir: Path,
+    t_idx: int
+):
+    """
+    * 2-D CAM  → overlay and save PNG for this frame.
+    * 1-D CAM  → save numpy once (t_idx==0).
+    """
+    if cam.ndim == 1:                                  # (T,)
+        if t_idx == 0:                                 # save only once
+            np.save(layer_dir / "temporal_cam.npy", cam)
+        return
+
+    out = overlay_heatmap(frame, cam)
+    cv2.imwrite(str(layer_dir / f"frame_{t_idx:03d}.png"), out)

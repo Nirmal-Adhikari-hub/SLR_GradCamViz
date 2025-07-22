@@ -1,161 +1,116 @@
+# main.py
 from __future__ import annotations
-
 import argparse
 from pathlib import Path
-from typing import List
+from typing import List, Dict
 
-import cv2
 import numpy as np
 import torch
 
 from dataset import PhoenixVideoTextDataset
-from cam_runner import CAMRunner, overlay_heatmap
+from cam_runner import CAMRunner, save_or_overlay   # ← new helper
 from models.slowfast_sign import SlowFastSign
 from models.twostream_slr import TwoStreamSLR
 
 
+# ────────────────────────────────────────────────────────────
 def parse_args():
-    """Parse command-line arguments."""
     p = argparse.ArgumentParser()
-    p.add_argument("--seq", help="sequence id or comma-separated list")
-    p.add_argument("--split", default="dev", help="dataset split (e.g., train, dev, test)")
-    p.add_argument(
-        "--models",
-        default="slowfast",
-        nargs="*",
-        choices=["slowfast", "twostream"],
-        help="which model(s) to run",
-    )
-    p.add_argument("--slowfast-ckpt", help="path to SlowFast checkpoint")
-    p.add_argument("--twostream-ckpt", help="path to TwoStream checkpoint")
-    p.add_argument(
-        "--target-from-gt",
-        action="store_true",
-        help="use ground-truth gloss in the middle frame as CAM target",
-    )
-    p.add_argument("--device", default="cuda:0", help="compute device")
+    p.add_argument("--seq", help="single sequence id or comma-separated list")
+    p.add_argument("--split", default="dev", choices=["train", "dev", "test"])
+    p.add_argument("--models", nargs="*", default=["slowfast"],
+                   choices=["slowfast", "twostream"])
+    p.add_argument("--slowfast-ckpt")
+    p.add_argument("--twostream-ckpt")
+    p.add_argument("--target-from-gt", action="store_true",
+                   help="use middle-frame ground-truth gloss for CAM target")
+    p.add_argument("--device", default="cuda:0")
     return p.parse_args()
 
 
-def load_model(name: str, ckpt: str | None):
-    """
-    Instantiate and (optionally) load a checkpoint into the model.
-    Supports 'slowfast' and 'twostream'.
-    """
-    if name == "slowfast":
-        model = SlowFastSign()
-    else:
-        model = TwoStreamSLR()
-
-    # load weights if checkpoint exists
-    if ckpt is not None and Path(ckpt).exists():
-        sd = torch.load(ckpt, map_location="cpu")
-        # unwrap state_dict if necessary
+# ────────────────────────────────────────────────────────────
+def load_model(name: str, ckpt_path: str | None) -> torch.nn.Module:
+    model = SlowFastSign() if name == "slowfast" else TwoStreamSLR()
+    if ckpt_path and Path(ckpt_path).exists():
+        sd = torch.load(ckpt_path, map_location="cpu")
         if isinstance(sd, dict) and "state_dict" in sd:
             sd = sd["state_dict"]
         model.load_state_dict(sd, strict=False)
-
     return model
 
 
+# ────────────────────────────────────────────────────────────
 def main():
-    args = parse_args()
+    args   = parse_args()
     device = torch.device(args.device)
 
-    # set up paths relative to this script
-    repo = Path(__file__).resolve().parent
-    root = repo.parent / "data" / "phoenix-2014-multisigner"
-    out_root = repo.parent / "outputs"
+    repo_root = Path(__file__).resolve().parent.parent
+    data_root = repo_root / "data" / "phoenix-2014-multisigner"
+    out_root  = repo_root / "outputs"
+    out_root.mkdir(parents=True, exist_ok=True)
 
-    # build sequence list if provided
-    if args.seq:
-        seq_list = [s.strip() for s in args.seq.split(",")]
-    else:
-        seq_list = None
+    seq_list: List[str] | None = (
+        [s.strip() for s in args.seq.split(",")] if args.seq else None
+    )
+    dataset = PhoenixVideoTextDataset(data_root, args.split, seq_ids=seq_list)
 
-    # load dataset (will index by sequence IDs)
-    dataset = PhoenixVideoTextDataset(root, args.split, seq_ids=seq_list)
-
-    # iterate over all sequences in the dataset
     for i in range(len(dataset)):
-        batch = dataset[i]
-        seq_id = dataset.seq_ids[i]
-        outputs_dir = out_root / seq_id
-        outputs_dir.mkdir(parents=True, exist_ok=True)
+        batch   = dataset[i]
+        seq_id  = dataset.seq_ids[i]
+        seq_out = out_root / seq_id
+        seq_out.mkdir(parents=True, exist_ok=True)
 
-        preds: dict[str, str] = {}
+        preds: Dict[str, str] = {}
         for name in args.models:
-            # choose checkpoint based on model name
-            ckpt = args.slowfast_ckpt if name == "slowfast" else args.twostream_ckpt
+            ckpt  = args.slowfast_ckpt if name == "slowfast" else args.twostream_ckpt
             model = load_model(name, ckpt).to(device)
 
-            # prepare input tensor(s)
-            # if name == "slowfast":
-            #     inp = batch["rgb"]
-            # else:
-            #     inp = [batch["rgb"], batch["pose"]]
-
+            # -------- build 5-D inputs (B,C,T,H,W) --------
+            rgb5d = batch["rgb"].permute(1, 0, 2, 3).unsqueeze(0).to(device)
             if name == "slowfast":
-                # (T,C,H,W) ➜ (1,C,T,H,W)
-                rgb5d = batch["rgb"].permute(1, 0, 2, 3).unsqueeze(0).to(device)
                 inp = rgb5d
             else:
-                rgb5d  = batch["rgb"].permute(1, 0, 2, 3).unsqueeze(0).to(device)
-                pose5d = (
-                    batch["pose"].permute(1, 0, 2, 3).unsqueeze(0).to(device)
-                    if batch["pose"] is not None else None
-                )
+                if batch["pose"] is not None:
+                    pose5d = batch["pose"].permute(1, 0, 2, 3).unsqueeze(0).to(device)
+                else:   # fallback: zero pose
+                    B, C, T, H, W = rgb5d.shape
+                    pose5d = torch.zeros((B, 2, T, H, W), dtype=rgb5d.dtype, device=device)
                 inp = [rgb5d, pose5d]
 
-            # compute Grad-CAMs for specified target layer(s)
+            # -------- run CAM extraction ------------------
             runner = CAMRunner(model, model.target_layers)
             target = None
             if args.target_from_gt and len(batch["gloss"]) > 0:
-                mid = len(batch["gloss"]) // 2
-                target = batch["gloss"][mid].item()
+                target = int(batch["gloss"][len(batch["gloss"]) // 2])
             cams = runner.run(inp, device, target)
 
-            # save heatmap overlays per frame and per layer
-            # for idx, cam in enumerate(cams):
-            #     layer_dir = outputs_dir / name / f"layer{idx + 1}"
-            #     layer_dir.mkdir(parents=True, exist_ok=True)
-            #     for t in range(cam.shape[0]):
-            #         frame = batch["rgb"][t].permute(1, 2, 0).cpu().numpy()
-            #         overlay = overlay_heatmap(frame, cam[t])
-            #         cv2.imwrite(str(layer_dir / f"frame_{t:03d}.png"), overlay)
-
+            # -------- save CAMs ---------------------------
             for idx, cam in enumerate(cams):
-                layer_dir = outputs_dir / name / f"layer{idx + 1}"
+                layer_dir = seq_out / name / f"layer{idx + 1}"
                 layer_dir.mkdir(parents=True, exist_ok=True)
 
-                # 2-D CAM → overlay per frame
-                if cam.ndim == 3:                     # (T,H,W)
-                    for t in range(cam.shape[0]):
-                        frame = batch["rgb"][t].permute(1, 2, 0).cpu().numpy()
-                        overlay = overlay_heatmap(frame, cam[t])
-                        cv2.imwrite(str(layer_dir / f"frame_{t:03d}.png"), overlay)
+                # spatial CAM (T,H,W)  or  (H,W)→(1,H,W)
+                if cam.ndim == 2:
+                    cam = cam[None, ...]
 
-                # 1-D CAM → save curve for later plotting
-                elif cam.ndim == 1:                   # (T,)
-                    np.save(layer_dir / "temporal_cam.npy", cam)
-                else:
-                    print(f"[WARN] Unknown CAM shape {cam.shape} – skipped save")
+                for t in range(min(cam.shape[0], len(batch["rgb"]))):
+                    frame = batch["rgb"][t].permute(1, 2, 0).cpu().numpy()
+                    save_or_overlay(frame, cam[t], layer_dir, t)
 
-            # also compute model predictions
-            with torch.no_grad(), torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
+            # -------- predictions -------------------------
+            with torch.no_grad(), torch.cuda.amp.autocast(enabled=device.type == "cuda"):
                 out = model(*inp) if isinstance(inp, list) else model(inp)
-                pred = out.argmax(-1)
-                preds[name] = " ".join(str(int(p)) for p in pred.squeeze())
+            preds[name] = " ".join(str(int(x)) for x in out.argmax(-1).flatten())
 
-        # write ground-truth and predictions to file
-        with open(outputs_dir / "preds.txt", "w") as f:
-            gt = " ".join(str(int(x)) for x in batch["gloss"])
-            f.write(f"GT: {gt}\n")
-            for model_name, text in preds.items():
-                f.write(f"{model_name}: {text}\n")
+        # save GT + predictions
+        with open(seq_out / "preds.txt", "w") as f:
+            f.write("GT:  " + " ".join(str(int(x)) for x in batch["gloss"]) + "\n")
+            for m, p in preds.items():
+                f.write(f"{m}: {p}\n")
 
     print("[DONE] outputs written to", out_root)
 
 
+# ────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     main()
