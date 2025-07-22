@@ -7,6 +7,8 @@ from typing import List, Dict
 import numpy as np
 import torch
 
+from tqdm import tqdm
+
 from dataset import PhoenixVideoTextDataset
 from cam_runner import CAMRunner, save_or_overlay   # ← new helper
 from models.slowfast_sign import SlowFastSign
@@ -25,17 +27,24 @@ def parse_args():
     p.add_argument("--target-from-gt", action="store_true",
                    help="use middle-frame ground-truth gloss for CAM target")
     p.add_argument("--device", default="cuda:0")
+    p.add_argument("--quiet", action="store_true",
+                   help="suppress verbose progress messages")
     return p.parse_args()
 
 
 # ────────────────────────────────────────────────────────────
-def load_model(name: str, ckpt_path: str | None) -> torch.nn.Module:
+def load_model(name: str, ckpt_path: str | None, verbose=True) -> torch.nn.Module:
     model = SlowFastSign() if name == "slowfast" else TwoStreamSLR()
     if ckpt_path and Path(ckpt_path).exists():
+        if verbose:
+            print(f"[LOAD] {name:<9} ← {ckpt_path}")
         sd = torch.load(ckpt_path, map_location="cpu")
         if isinstance(sd, dict) and "state_dict" in sd:
             sd = sd["state_dict"]
         model.load_state_dict(sd, strict=False)
+    else:
+        if verbose:
+            print(f"[LOAD] {name:<9} – using random weights")
     return model
 
 
@@ -43,6 +52,7 @@ def load_model(name: str, ckpt_path: str | None) -> torch.nn.Module:
 def main():
     args   = parse_args()
     device = torch.device(args.device)
+    verbose = not args.quiet
 
     repo_root = Path(__file__).resolve().parent.parent
     data_root = repo_root / "data" / "phoenix-2014-multisigner"
@@ -54,16 +64,21 @@ def main():
     )
     dataset = PhoenixVideoTextDataset(data_root, args.split, seq_ids=seq_list)
 
-    for i in range(len(dataset)):
+    seq_iter = tqdm(range(len(dataset)), desc="Sequences", disable=not verbose)
+    for i in seq_iter:
         batch   = dataset[i]
         seq_id  = dataset.seq_ids[i]
+        seq_iter.set_postfix_str(seq_id)
         seq_out = out_root / seq_id
         seq_out.mkdir(parents=True, exist_ok=True)
 
         preds: Dict[str, str] = {}
         for name in args.models:
-            ckpt  = args.slowfast_ckpt if name == "slowfast" else args.twostream_ckpt
-            model = load_model(name, ckpt).to(device)
+            model = load_model(
+                name,
+                args.slowfast_ckpt if name == "slowfast" else args.twostream_ckpt,
+                verbose
+            ).to(device)
 
             # -------- build 5-D inputs (B,C,T,H,W) --------
             rgb5d = batch["rgb"].permute(1, 0, 2, 3).unsqueeze(0).to(device)
@@ -72,24 +87,28 @@ def main():
             else:
                 if batch["pose"] is not None:
                     pose5d = batch["pose"].permute(1, 0, 2, 3).unsqueeze(0).to(device)
-                else:   # fallback: zero pose
+                else:
                     B, C, T, H, W = rgb5d.shape
                     pose5d = torch.zeros((B, 2, T, H, W), dtype=rgb5d.dtype, device=device)
                 inp = [rgb5d, pose5d]
 
             # -------- run CAM extraction ------------------
             runner = CAMRunner(model, model.target_layers)
-            target = None
-            if args.target_from_gt and len(batch["gloss"]) > 0:
-                target = int(batch["gloss"][len(batch["gloss"]) // 2])
+            target = (int(batch["gloss"][len(batch["gloss"]) // 2])
+                      if args.target_from_gt and len(batch["gloss"]) > 0 else None)
+
+            if verbose:
+                print(f"[CAM ] {seq_id} – {name} – extracting {len(model.target_layers)} layers")
+
             cams = runner.run(inp, device, target)
 
             # -------- save CAMs ---------------------------
-            for idx, cam in enumerate(cams):
+            layer_iter = tqdm(enumerate(cams), total=len(cams),
+                              desc=f"{name} layers", leave=False, disable=not verbose)
+            for idx, cam in layer_iter:
                 layer_dir = seq_out / name / f"layer{idx + 1}"
                 layer_dir.mkdir(parents=True, exist_ok=True)
 
-                # spatial CAM (T,H,W)  or  (H,W)→(1,H,W)
                 if cam.ndim == 2:
                     cam = cam[None, ...]
 
@@ -108,7 +127,11 @@ def main():
             for m, p in preds.items():
                 f.write(f"{m}: {p}\n")
 
-    print("[DONE] outputs written to", out_root)
+        if verbose:
+            print(f"[SAVE] outputs → {seq_out}")
+
+    if verbose:
+        print("[DONE] outputs written to", out_root)
 
 
 # ────────────────────────────────────────────────────────────

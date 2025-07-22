@@ -154,8 +154,10 @@ def overlay_heatmap(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
         return np.vstack([image, bar])                   # stack under frame
 
     # ─ spatial mask ─
-    heat = cv2.applyColorMap((mask * 255).astype(np.uint8),
-                             cv2.COLORMAP_JET)
+    mask = np.squeeze(mask, axis=-1) if mask.ndim == 3 else mask  # (H,W)
+    heat = cv2.applyColorMap(
+        np.uint8(np.clip(mask * 255, 0, 255)), cv2.COLORMAP_JET
+    )
     blended = np.clip(0.5 * heat.astype(float) +
                       0.5 * image.astype(float), 0, 255)
     return blended.astype(np.uint8)
